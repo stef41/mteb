@@ -60,7 +60,7 @@ def _aggregate_and_pivot(
 
     # perform aggregation
     if aggregation_fn is None:
-        aggregation_fn = np.mean
+        aggregation_fn = "mean"
 
     if format == "wide":
         return df.pivot_table(

@@ -706,7 +706,7 @@ def get_leaderboard_app(  # noqa: PLR0914
                 _radar_chart, inputs=[summary_data], outputs=[radar_plot]
             )
 
-        with gr.Tab("Performance per task"):
+        with gr.Tab("Performance per task") as per_task_tab:
             per_task_table.render()
             download_per_task = gr.DownloadButton("Download Table")
             download_per_task.click(
@@ -733,7 +733,7 @@ def get_leaderboard_app(  # noqa: PLR0914
         # This sets the benchmark from the URL query parameters
         demo.load(_set_benchmark_on_load, inputs=[], outputs=[benchmark_select])
 
-        def on_benchmark_select(benchmark_name, request: gr.Request | None = None):
+        def on_benchmark_select(benchmark_name, request: gr.Request | None = None):  # noqa: PLR0914
             (
                 languages,
                 domains,
@@ -760,9 +760,20 @@ def get_leaderboard_app(  # noqa: PLR0914
                 if task_type != "InstructionRetrieval"
             }
             display_radar = len(eligible_task_types) > 1
-            _, summary_raw = apply_summary_styling_from_benchmark(
-                mteb.get_benchmark(benchmark_name), benchmark_results
+
+            # Compute all tables directly so every tab is up-to-date immediately.
+            # update_summary/per_task/per_language are defined later in the same scope
+            # but resolved at call time, so this is safe.
+            summary_table_val, summary_raw, language_tab_update = update_summary(
+                scores, benchmark_tasks, initial_models, benchmark_name, languages
             )
+            per_task_val = update_per_task(
+                scores, benchmark_tasks, initial_models, benchmark_name, languages
+            )
+            per_language_val = update_per_language(
+                scores, benchmark_tasks, initial_models, benchmark_name, languages
+            )
+
             return (
                 gr.update(choices=languages, value=languages),
                 gr.update(choices=domains, value=domains),
@@ -773,10 +784,16 @@ def get_leaderboard_app(  # noqa: PLR0914
                 gr.update(visible=show_zero_shot),
                 initial_models,
                 gr.update(visible=display_radar),
-                gr.update(value=summary_raw),
-                _performance_size_plot(summary_raw),
-                _performance_over_time_plot(summary_raw),
-                _radar_chart(summary_raw),
+                summary_raw,
+                # Plots are lazy-loaded when the user visits each tab via tab.select,
+                # so we only clear them here instead of eagerly recomputing all three.
+                gr.update(value=None),
+                gr.update(value=None),
+                gr.update(value=None),
+                summary_table_val,
+                per_task_val,
+                per_language_val,
+                language_tab_update,
             )
 
         benchmark_select.change(
@@ -796,6 +813,10 @@ def get_leaderboard_app(  # noqa: PLR0914
                 plot,
                 timeline_plot,
                 radar_plot,
+                summary_table,
+                per_task_table,
+                per_language_table,
+                language_tab,
             ],
         )
         for trigger in [lang_select, type_select, domain_select]:
@@ -925,14 +946,14 @@ def get_leaderboard_app(  # noqa: PLR0914
             model_type_select,
             request=None: hash(
                 (
-                    id(scores),
-                    hash(tuple(tasks)),
+                    hash(frozenset(e["model_name"] for e in scores)),
+                    hash(tuple(sorted(tasks))),
                     hash(availability),
-                    hash(tuple(compatibility)),
+                    hash(tuple(sorted(compatibility))),
                     hash(instructions),
                     hash(max_model_size),
                     hash(zero_shot),
-                    hash(tuple(model_type_select)),
+                    hash(tuple(sorted(model_type_select))),
                 )
             ),
         )
@@ -1103,23 +1124,12 @@ def get_leaderboard_app(  # noqa: PLR0914
             preprocess=False,
         )
 
-        def _cache_key_for_update_tables(
+        def _make_filter_cache_key(
             scores, tasks, models_to_keep, benchmark_name, languages
         ):
-            # Build a deterministic fingerprint from score content.
-            # This keeps cache hits for equivalent data while invalidating on language-driven score changes.
-            score_signature = []
-            for entry in scores:
-                score_signature.append(
-                    (
-                        entry.get("model_name"),
-                        entry.get("task_name"),
-                        entry.get("score"),
-                    )
-                )
-            scores_hash = hash(tuple(sorted(score_signature)))
+            # Scores are deterministically derived from (benchmark_name, languages),
+            # both of which are already parameters — no need to iterate score entries.
             tasks_hash = hash(tuple(sorted(tasks)))
-            # Sort models_to_keep to ensure consistent hash regardless of input order
             models_hash = (
                 hash(tuple(sorted(models_to_keep)))
                 if models_to_keep is not None
@@ -1129,31 +1139,17 @@ def get_leaderboard_app(  # noqa: PLR0914
             lang_hash = (
                 hash(tuple(sorted(languages))) if languages is not None else None
             )
-            key = hash((scores_hash, tasks_hash, models_hash, bench_hash, lang_hash))
+            return hash((tasks_hash, models_hash, bench_hash, lang_hash))
 
-            return key
-
-        @cachetools.cached(
-            cache={},
-            key=_cache_key_for_update_tables,
-        )
-        def update_tables(
-            scores,
-            tasks,
-            models_to_keep,
-            benchmark_name: str,
-            languages: list[str],
+        def _get_filtered_benchmark_results(
+            scores, tasks, models_to_keep, benchmark_name, languages
         ):
-            start_time = time.time()
-            tasks = set(tasks)
-            benchmark = mteb.get_benchmark(benchmark_name)
-
-            # Extract filtered model and task names from scores (respects UI filters)
+            """Shared filtering logic used by all per-tab render functions."""
+            tasks_set = set(tasks)
             filtered_model_names = set()
             filtered_task_names = set()
-
             for entry in scores:
-                if entry["task_name"] not in tasks:
+                if entry["task_name"] not in tasks_set:
                     continue
                 if (models_to_keep is not None) and (
                     entry["model_name"] not in models_to_keep
@@ -1161,50 +1157,86 @@ def get_leaderboard_app(  # noqa: PLR0914
                     continue
                 filtered_model_names.add(entry["model_name"])
                 filtered_task_names.add(entry["task_name"])
-
-            filtered_benchmark_results = _filter_benchmark_results_for_tables(
+            return _filter_benchmark_results_for_tables(
                 benchmark_results=all_benchmark_results[benchmark_name],
                 task_names=filtered_task_names,
                 model_names=filtered_model_names,
                 languages=languages,
             )
 
+        @cachetools.cached(cache={}, key=_make_filter_cache_key)
+        def update_summary(scores, tasks, models_to_keep, benchmark_name, languages):
+            start_time = time.time()
+            benchmark = mteb.get_benchmark(benchmark_name)
+            filtered = _get_filtered_benchmark_results(
+                scores, tasks, models_to_keep, benchmark_name, languages
+            )
             summary, summary_raw = apply_summary_styling_from_benchmark(
-                benchmark, filtered_benchmark_results
-            )
-            per_task = apply_per_task_styling_from_benchmark(
-                benchmark, filtered_benchmark_results
-            )
-            per_language = apply_per_language_styling_from_benchmark(
-                benchmark,
-                filtered_benchmark_results,
+                benchmark, filtered
             )
             elapsed = time.time() - start_time
-            logger.debug(f"update_tables callback: {elapsed}s")
+            logger.debug(f"update_summary callback: {elapsed}s")
             return (
                 summary,
                 summary_raw,
-                per_task,
-                per_language,
                 gr.update(visible=len(benchmark.language_view) > 0),
             )
 
-        # Only update tables when models change, not when scores/tasks change directly
-        # This avoids redundant updates since scores/tasks changes trigger update_models
-        # which then triggers models.change
+        @cachetools.cached(cache={}, key=_make_filter_cache_key)
+        def update_per_task(scores, tasks, models_to_keep, benchmark_name, languages):
+            start_time = time.time()
+            benchmark = mteb.get_benchmark(benchmark_name)
+            filtered = _get_filtered_benchmark_results(
+                scores, tasks, models_to_keep, benchmark_name, languages
+            )
+            per_task = apply_per_task_styling_from_benchmark(benchmark, filtered)
+            elapsed = time.time() - start_time
+            logger.debug(f"update_per_task callback: {elapsed}s")
+            return per_task
+
+        @cachetools.cached(cache={}, key=_make_filter_cache_key)
+        def update_per_language(
+            scores, tasks, models_to_keep, benchmark_name, languages
+        ):
+            start_time = time.time()
+            benchmark = mteb.get_benchmark(benchmark_name)
+            filtered = _get_filtered_benchmark_results(
+                scores, tasks, models_to_keep, benchmark_name, languages
+            )
+            per_language = apply_per_language_styling_from_benchmark(
+                benchmark, filtered
+            )
+            elapsed = time.time() - start_time
+            logger.debug(f"update_per_language callback: {elapsed}s")
+            return per_language
+
+        _filter_inputs = [scores, task_select, models, benchmark_select, lang_select]
+
+        # Summary updates eagerly on every filter change (most-viewed tab).
+        # task_select and lang_select are direct triggers in addition to models because
+        # programmatic updates to task_select may not always propagate through models.change.
         for item in [models, task_select, lang_select]:
             item.change(
-                update_tables,
-                inputs=[scores, task_select, models, benchmark_select, lang_select],
-                outputs=[
-                    summary_table,
-                    summary_data,
-                    per_task_table,
-                    per_language_table,
-                    language_tab,
-                ],
+                update_summary,
+                inputs=_filter_inputs,
+                outputs=[summary_table, summary_data, language_tab],
                 preprocess=False,
             )
+
+        # Per-task and per-language tables render lazily when their tab is visited,
+        # keeping filter interactions fast for the common case (summary tab).
+        per_task_tab.select(
+            update_per_task,
+            inputs=_filter_inputs,
+            outputs=[per_task_table],
+            preprocess=False,
+        )
+        language_tab.select(
+            update_per_language,
+            inputs=_filter_inputs,
+            outputs=[per_language_table],
+            preprocess=False,
+        )
 
         gr.Markdown(ACKNOWLEDGEMENT, elem_id="ack_markdown")
     interface_time = time.time() - interface_start
@@ -1212,7 +1244,9 @@ def get_leaderboard_app(  # noqa: PLR0914
 
     logger.info("Starting prerun on all benchmarks to populate caches...")
     prerun_start = time.time()
-    # Prerun on all benchmarks, so that results of callbacks get cached
+    # Prerun on all benchmarks to populate caches.
+    # on_benchmark_select already calls update_summary/per_task/per_language internally,
+    # so a single call per benchmark warms all table caches for the default filter state.
     for benchmark in benchmarks:
         (
             bench_languages,
@@ -1221,23 +1255,19 @@ def get_leaderboard_app(  # noqa: PLR0914
             bench_modalities,
             bench_tasks,
             bench_scores,
-            zero_shot,
+            _zero_shot,
             bench_initial_models,
-            display_radar,
-            summary_raw,
-            perf_size_plot,
-            perf_time_plot,
-            radar_chart_plot,
+            _display_radar,
+            _summary_raw,
+            _plot,
+            _timeline_plot,
+            _radar_plot,
+            _summary_table,
+            _per_task_table,
+            _per_language_table,
+            _language_tab,
         ) = on_benchmark_select(benchmark.name)
-        # Call update_tables to populate cache (simulating models.change trigger)
-        update_tables(
-            bench_scores,
-            bench_tasks,
-            bench_initial_models,
-            benchmark.name,
-            bench_languages,
-        )
-        # Also cache the filtered tasks scenario
+        # Also cache the filtered-tasks scenario (subset of tasks after type/domain filtering)
         filtered_tasks = update_task_list(
             benchmark.name,
             bench_types,
@@ -1245,7 +1275,7 @@ def get_leaderboard_app(  # noqa: PLR0914
             bench_languages,
             bench_modalities,
         )
-        update_tables(
+        update_summary(
             bench_scores,
             filtered_tasks,
             bench_initial_models,
@@ -1304,4 +1334,5 @@ if __name__ == "__main__":
             font=[gr.themes.GoogleFont("Roboto Mono"), "Arial", "sans-serif"],
         ),
         head=head,
+        mcp_server=True,
     )

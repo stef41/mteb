@@ -35,13 +35,14 @@ def _get_column_widths(df: pd.DataFrame) -> list[str]:
     # Please do not remove this function when refactoring.
     # Column width calculation seeminlgy changes regularly with Gradio releases,
     # and this piece of logic is good enough to quickly fix related issues.
+    sample = df.head(10)
     widths = []
     for column_name in df.columns:
         column_word_lengths = [len(word) for word in column_name.split()]
-        if is_numeric_dtype(df[column_name]):
-            value_lengths = [len(f"{value:.2f}") for value in df[column_name]]
+        if is_numeric_dtype(sample[column_name]):
+            value_lengths = [len(f"{value:.2f}") for value in sample[column_name]]
         else:
-            value_lengths = [len(str(value)) for value in df[column_name]]
+            value_lengths = [len(str(value)) for value in sample[column_name]]
         max_length = max(max(column_word_lengths), max(value_lengths))  # noqa: PLW3301
         n_pixels = 25 + (max_length * 10)
         widths.append(f"{n_pixels}px")
@@ -63,6 +64,9 @@ def _create_light_green_cmap():
         "LightGreens", half_cmap, N=256
     )
     return light_green_cmap
+
+
+_LIGHT_GREEN_CMAP = _create_light_green_cmap()
 
 
 def apply_summary_styling_from_benchmark(
@@ -169,7 +173,7 @@ def _apply_summary_table_styling(joint_table: pd.DataFrame) -> gr.DataFrame:
     gradient_columns = [
         col for col in joint_table.columns if col not in excluded_columns
     ]
-    light_green_cmap = _create_light_green_cmap()
+    light_green_cmap = _LIGHT_GREEN_CMAP
 
     # Determine score columns (before formatting)
     score_columns = [

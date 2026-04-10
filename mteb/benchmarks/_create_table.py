@@ -69,22 +69,21 @@ def _get_embedding_size(embed_dim: int | list[int] | None) -> int | None:
     return None
 
 
-def _get_means_per_types(per_task: pd.DataFrame):
-    task_names_per_type = defaultdict(list)
+def _get_means_per_types(per_task: pd.DataFrame) -> pd.DataFrame:
+    """Return a wide DataFrame: index=model_name, columns=split task_type names, values=mean score.
+
+    Replaces the original long-format + pivot pattern at every call site.
+    """
+    task_names_per_type: dict[str, list[str]] = defaultdict(list)
     for task_name in per_task.columns:
         task_type = get_task(task_name).metadata.type
         task_names_per_type[task_type].append(task_name)
-    records = []
-    for task_type, tasks in task_names_per_type.items():
-        for model_name, scores in per_task.iterrows():
-            records.append(
-                dict(
-                    model_name=model_name,
-                    task_type=task_type,
-                    score=scores[tasks].mean(skipna=False),
-                )
-            )
-    return pd.DataFrame.from_records(records)
+
+    result = {
+        _split_on_capital(task_type): per_task[tasks].mean(axis=1, skipna=False)
+        for task_type, tasks in task_names_per_type.items()
+    }
+    return pd.DataFrame(result, index=per_task.index)
 
 
 def _create_summary_table_from_benchmark_results(
@@ -125,12 +124,6 @@ def _create_summary_table_from_benchmark_results(
 
     # Calculate means by task type
     mean_per_type = _get_means_per_types(per_task)
-    mean_per_type = mean_per_type.pivot(
-        index="model_name", columns="task_type", values="score"
-    )
-    mean_per_type.columns = [
-        _split_on_capital(column) for column in mean_per_type.columns
-    ]
 
     # Calculate overall means
     typed_mean = mean_per_type.mean(skipna=False, axis=1)
@@ -367,12 +360,6 @@ def _create_summary_table_mean_public_private(
 
     # Calculate means by task type
     mean_per_type = _get_means_per_types(per_task)
-    mean_per_type = mean_per_type.pivot(
-        index="model_name", columns="task_type", values="score"
-    )
-    mean_per_type.columns = [
-        _split_on_capital(column) for column in mean_per_type.columns
-    ]
 
     # Calculate overall means
     public_mean = per_task[public_task_name].mean(skipna=False, axis=1)
@@ -490,12 +477,6 @@ def _create_summary_table_mean_subset(
 
     # Calculate means by task type
     mean_per_type = _get_means_per_types(per_task)
-    mean_per_type = mean_per_type.pivot(
-        index="model_name", columns="task_type", values="score"
-    )
-    mean_per_type.columns = [
-        _split_on_capital(column) for column in mean_per_type.columns
-    ]
 
     # Calculate subset means (each task-language combination weighted equally)
     detailed_data = benchmark_results.to_dataframe(
@@ -618,12 +599,6 @@ def _create_summary_table_mean_task_type(
 
     # Calculate means by task type
     mean_per_type = _get_means_per_types(per_task)
-    mean_per_type = mean_per_type.pivot(
-        index="model_name", columns="task_type", values="score"
-    )
-    mean_per_type.columns = [
-        _split_on_capital(column) for column in mean_per_type.columns
-    ]
 
     # Calculate overall means
     typed_mean = mean_per_type.mean(skipna=False, axis=1)

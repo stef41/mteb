@@ -308,12 +308,6 @@ class VidoreBenchmark(Benchmark):
 
         # Calculate means by task type
         mean_per_type = _get_means_per_types(per_task)
-        mean_per_type = mean_per_type.pivot(
-            index="model_name", columns="task_type", values="score"
-        )
-        mean_per_type.columns = [
-            _split_on_capital(column) for column in mean_per_type.columns
-        ]
 
         # Calculate overall means
         public_mean = per_task[public_task_name].mean(skipna=False, axis=1)
